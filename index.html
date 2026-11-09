@@ -176,6 +176,9 @@ fieldset:disabled { opacity: .7; }
 .set-row input { width: 100%; text-align: right; font-family: var(--font-mono); font-size: 16px; padding: 6px 8px; min-height: 40px; background: var(--bg); border: 1px dashed var(--line); border-radius: 3px; color: var(--ink-3); }
 .set-row.done input { color: var(--ink); border-style: solid; background: var(--surface); }
 .set-row input:focus { background: var(--surface); color: var(--ink); }
+.ex.stalled .set-row:not(.done) input:not(:focus) { color: var(--critical); border-color: var(--critical); }
+.stall-note { display: none; margin: 8px 0 0; font-size: 12px; font-weight: 600; text-transform: uppercase; letter-spacing: .05em; color: var(--critical); }
+.ex.stalled .stall-note { display: block; }
 .x { color: var(--ink-3); text-align: center; }
 .set-row.done .ex-actions { display: flex; flex-wrap: wrap; gap: 8px; }
 .recent td { cursor: pointer; }
@@ -479,12 +482,39 @@ input.title-input { font-size: 24px; }
     });
   }
   const dayCount = id => (HIST.get(id) || []).length + (WONLY.get(id) || []).length;
+  // Everything you'd done on this exercise before a date.
+  function statsBefore(h, date) {
+    const sets = []; let maxW = 0, bestR0 = 0;
+    h.forEach(s => { if (s.date < date) s.sets.forEach(st => { if (st.w > 0) { sets.push(st); maxW = Math.max(maxW, st.w); } else bestR0 = Math.max(bestR0, st.r); }); });
+    return { sets, maxW, bestR0 };
+  }
   function priorFor(ex, date) {
     const h = HIST.get(ex); if (!h) return null;
     const prior = h.filter(s => s.date < date); if (!prior.length) return null;
-    const sets = []; let maxW = 0, bestR0 = 0;
-    prior.forEach(s => s.sets.forEach(st => { if (st.w > 0) { sets.push(st); maxW = Math.max(maxW, st.w); } else bestR0 = Math.max(bestR0, st.r); }));
-    return { last: prior[prior.length - 1], sets, maxW, bestR0 };
+    return Object.assign({ last: prior[prior.length - 1] }, statsBefore(h, date));
+  }
+  // A PR is a set that beats something you've actually done: nothing before matches it on both weight and reps,
+  // and it's either your heaviest weight ever or it beats a set you've done (more weight, more reps, or both).
+  // Bodyweight: more reps than ever.
+  function beats(w, r, p) {
+    if (!(r > 0) || !p) return false;
+    if (!(w > 0)) return p.bestR0 > 0 && r > p.bestR0;
+    if (!p.sets.length) return false;
+    if (p.sets.some(x => x.w >= w && x.r >= r)) return false;
+    return w > p.maxW || p.sets.some(x => x.w <= w && x.r <= r);
+  }
+  // Stalled: no PR in the last 3 weeks. Only judged once you've done it for 3+ weeks, with 2+ sessions in those 3 weeks.
+  const STALL_DAYS = 21;
+  function stallFor(ex, date) {
+    const h = HIST.get(ex); if (!h) return false;
+    const cut = addDays(date, -STALL_DAYS), recent = h.filter(s => s.date > cut && s.date < date);
+    if (!h.some(s => s.date <= cut) || recent.length < 2) return false;
+    return !recent.some(s => { const p = statsBefore(h, s.date); return s.sets.some(st => beats(st.w, st.r, p)); });
+  }
+  function isStalled(row) {
+    if (!stallFor(row.ex, sess.date)) return false;
+    const p = priorFor(row.ex, sess.date);   // a PR today ends it
+    return !row.sets.some(st => isPR(st, p));
   }
   function usedInMap() {
     const m = new Map();
@@ -844,16 +874,7 @@ input.title-input { font-size: 24px; }
     const target = bw ? `${last.maxR + 1} reps` : `${fmtW(last.best.w)}×${last.best.r + 1} or ${fmtW(last.best.w + stepFor(last.best.w))}×${last.best.r}`;
     return `<span class="hint-last">Last time, ${esc(fmtDate(last.date))}:</span><span class="mono">${esc(setsText(last.sets, bw))}</span><span class="hint-target">Beat it: <b>${esc(target)}</b></span>`;
   }
-  function isPR(st, p) {
-    const w = num(st.w), r = Math.round(num(st.r));
-    if (!st.done || !(r > 0) || !p) return false;
-    if (!(w > 0)) return p.bestR0 > 0 && r > p.bestR0;
-    if (!p.sets.length) return false;
-    // a real record: no set you've done matches it on both weight and reps,
-    // and it's either your heaviest weight ever or it beats a set you've done (more weight, more reps, or both)
-    if (p.sets.some(x => x.w >= w && x.r >= r)) return false;
-    return w > p.maxW || p.sets.some(x => x.w <= w && x.r <= r);
-  }
+  const isPR = (st, p) => !!st.done && beats(num(st.w), Math.round(num(st.r)), p);
   function setNum(st, s, p) {
     return isPR(st, p) ? `<span class="set-n pr" title="Set ${s + 1}: a personal record">PR</span>` : `<span class="set-n">${s + 1}</span>`;
   }
@@ -874,7 +895,7 @@ input.title-input { font-size: 24px; }
   function rowCard(row, i) {
     const p = priorFor(row.ex, sess.date), cue = (EX.get(row.ex) || {}).note;
     const logged = row.sets.some(st => st.done);
-    return `<article class="ex${logged ? " logged" : ""}" data-i="${i}">
+    return `<article class="ex${logged ? " logged" : ""}${isStalled(row) ? " stalled" : ""}" data-i="${i}">
       <div class="ex-head">
         <span class="ex-num" aria-hidden="true">${i + 1}</span>
         <h3 class="ex-title">${esc(exName(row.ex, row.name))}</h3>
@@ -883,6 +904,7 @@ input.title-input { font-size: 24px; }
         ${row.extra ? `<button type="button" class="icon-btn remove-extra" aria-label="Remove ${esc(exName(row.ex, row.name))} from today">×</button>` : ""}
       </div>
       <div class="ex-body">
+        <p class="stall-note">No PR in 3 weeks</p>
         ${row.opts.length > 1 ? `<label class="swap"><span>Doing</span><select class="swap-sel" aria-label="Which variation you did">${row.opts.map(o => `<option value="${esc(o)}"${o === row.ex ? " selected" : ""}>${esc(exName(o))}</option>`).join("")}</select></label>` : ""}
         ${cue ? `<p class="cue"><span class="cue-l">Note</span>${esc(cue)}</p>` : ""}
         <div class="hint">${hintHtml(p, row.ex)}</div>
@@ -987,6 +1009,7 @@ input.title-input { font-size: 24px; }
       const p = priorFor(row.ex, sess.date);
       $(".hint", card).innerHTML = hintHtml(p, row.ex);
       row.sets.forEach((st, s) => syncRow(card, row, s, p));
+      card.classList.toggle("stalled", isStalled(row));
     });
     $("#sessMeta").innerHTML = sessMetaHtml();
     $("#recent").innerHTML = recentHtml();
@@ -1007,6 +1030,7 @@ input.title-input { font-size: 24px; }
     const p = priorFor(row.ex, sess.date);
     row.sets.forEach((st, s) => syncRow(card, row, s, p));
     card.classList.toggle("logged", row.sets.some(x => x.done));
+    card.classList.toggle("stalled", isStalled(row));
     $("#sessMeta").innerHTML = sessMetaHtml();
   }
 
