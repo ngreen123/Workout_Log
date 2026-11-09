@@ -166,6 +166,22 @@ fieldset:disabled { opacity: .7; }
 .cue-l { font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: .06em; color: var(--ink-3); margin-right: 6px; }
 .hint { margin: 8px 0 6px; font-size: 13px; color: var(--ink-2); display: flex; flex-wrap: wrap; gap: 2px 10px; align-items: baseline; }
 .hint-last { color: var(--ink-3); }
+/* Exercise calendar */
+.cal-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.cal-nav { font-size: 22px; }
+.cal-nav:disabled { opacity: .25; cursor: default; }
+.cal-grid { display: grid; grid-template-columns: repeat(7, 1fr); gap: 4px; margin-top: 4px; }
+.cal-wd { font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: .06em; color: var(--ink-3); text-align: center; padding: 2px 0; }
+.cal-cell { aspect-ratio: 1; max-height: 52px; display: grid; place-items: center; font-family: var(--font-mono); font-size: 14px; color: var(--ink-3); border: 1px solid transparent; border-radius: 2px; }
+.cal-cell.today { border-color: var(--ink-3); color: var(--ink); }
+button.cal-day { appearance: none; padding: 0; width: 100%; font: inherit; font-family: var(--font-mono); font-weight: 600; background: var(--accent); border-color: var(--accent); color: var(--on-accent); cursor: pointer; }
+button.cal-day.wo { background: transparent; border: 1px dashed var(--accent); color: var(--accent-ink); }
+button.cal-day[aria-pressed="true"] { background: var(--ink); border-color: var(--ink); border-style: solid; color: var(--surface); }
+.cal-out { margin-top: 12px; border-top: 1px solid var(--line); padding-top: 12px; }
+.cal-entry + .cal-entry { margin-top: 10px; }
+.cal-entry-head { display: flex; flex-wrap: wrap; align-items: baseline; justify-content: space-between; gap: 4px 12px; }
+.cal-sets { font-family: var(--font-mono); font-size: 15px; margin: 4px 0 0; }
+.hint-go { appearance: none; background: none; border: 0; padding: 0; font: inherit; color: var(--accent-ink); text-decoration: underline; text-underline-offset: 2px; cursor: pointer; }
 .hint-target b { color: var(--accent-ink); font-family: var(--font-mono); font-weight: 500; }
 .sets { margin: 4px 0 8px; display: flex; flex-direction: column; gap: 6px; }
 .set-row { display: grid; grid-template-columns: 34px minmax(64px, 120px) 14px minmax(56px, 100px) 34px; gap: 6px; align-items: center; }
@@ -421,7 +437,7 @@ input.title-input { font-size: 24px; }
   let page = "workouts", pageId = "", mode = "log";
   let sess = null;
   const drafts = new Map();
-  let pendingDate = null;
+  let pendingDate = null, pendingWid = null;   // open this workout on this date next
   const lastWritten = new Map();
   let dirty = false, saving = false, savePending = false, saveTimer = null, savingP = Promise.resolve(), retries = 0;
   let exFilter = store.get("exFilter", "all"), exSearch = "", progRange = store.get("range", "all");
@@ -503,18 +519,27 @@ input.title-input { font-size: 24px; }
     if (p.sets.some(x => x.w >= w && x.r >= r)) return false;
     return w > p.maxW || p.sets.some(x => x.w <= w && x.r <= r);
   }
-  // Stalled: no PR in the last 3 weeks. Only judged once you've done it for 3+ weeks, with 2+ sessions in those 3 weeks.
+  // Stalled: no progress in the last 3 weeks, meaning no set beat something you'd done before it.
+  // After a 3+ week break from an exercise, it starts fresh: you're compared only to what you've done since coming back.
+  // Only judged once you've been doing it (since any break) for 3+ weeks, with 2+ sessions in the last 3 weeks.
   const STALL_DAYS = 21;
   function stallFor(ex, date) {
-    const h = HIST.get(ex); if (!h) return false;
-    const cut = addDays(date, -STALL_DAYS), recent = h.filter(s => s.date > cut && s.date < date);
-    if (!h.some(s => s.date <= cut) || recent.length < 2) return false;
-    return !recent.some(s => { const p = statsBefore(h, s.date); return s.sets.some(st => beats(st.w, st.r, p)); });
+    const all = HIST.get(ex); if (!all) return null;
+    // days you did it before this date (days with only weights logged count as doing it)
+    const days = [...new Set(all.map(s => s.date).concat((WONLY.get(ex) || []).map(s => s.date)))].filter(d => d < date).sort();
+    if (!days.length) return null;
+    let start = days[0];
+    for (let i = 1; i < days.length; i++) if (days[i] >= addDays(days[i - 1], STALL_DAYS)) start = days[i];
+    const h = all.filter(s => s.date >= start && s.date < date);
+    const cut = addDays(date, -STALL_DAYS), recent = h.filter(s => s.date > cut);
+    if (!h.some(s => s.date <= cut) || recent.length < 2) return null;
+    if (recent.some(s => { const p = statsBefore(h, s.date); return s.sets.some(st => beats(st.w, st.r, p)); })) return null;
+    return { p: statsBefore(h, date) };
   }
   function isStalled(row) {
-    if (!stallFor(row.ex, sess.date)) return false;
-    const p = priorFor(row.ex, sess.date);   // a PR today ends it
-    return !row.sets.some(st => isPR(st, p));
+    const st = stallFor(row.ex, sess.date); if (!st) return false;
+    // beating something you've done (since any break) today ends it
+    return !row.sets.some(x => x.done && beats(num(x.w), Math.round(num(x.r)), st.p));
   }
   function usedInMap() {
     const m = new Map();
@@ -776,7 +801,7 @@ input.title-input { font-size: 24px; }
       if (l.date >= date || (best && l.date <= best.date)) return;
       const sets = [];
       l.entries.forEach(e => { if (e.ex === ex) sets.push(...e.sets); });
-      if (sets.length) best = { date: l.date, sets };
+      if (sets.length) best = { date: l.date, sets, logs: [{ id: l.id, wid: l.workoutId, wname: l.workoutName }] };
     });
     return best;
   }
@@ -863,16 +888,24 @@ input.title-input { font-size: 24px; }
   });
 
   // ---------- Workout: log mode ----------
+  // "Last time, Fri, Nov 6 in Chest + Back:" (names the workout when it's a different one). Tap the date to open that session.
+  function lastLabel(date, logs) {
+    const lg = logs.find(x => x.wid === sess.wid) || logs.find(x => WK.has(x.wid)) || logs[0];
+    const name = lg ? (WK.get(lg.wid) || {}).name || lg.wname || "" : "";
+    const d = esc(fmtDate(date));
+    const dateHtml = lg && WK.has(lg.wid) ? `<button type="button" class="hint-go" data-wid="${esc(lg.wid)}" data-date="${date}">${d}</button>` : d;
+    return `<span class="hint-last">Last time, ${dateHtml}${lg && lg.wid !== sess.wid && name ? " in " + esc(name) : ""}:</span>`;
+  }
   function hintHtml(p, ex) {
     const la = ex && sess ? lastAnyFor(ex, sess.date) : null;
     if (la && (!p || la.date > p.last.date) && la.sets.some(s => !(s.r > 0))) {
       const txt = la.sets.map(s => fmtW(s.w) + (s.r > 0 ? "×" + s.r : " lb")).join(" · ");
-      return `<span class="hint-last">Last time, ${esc(fmtDate(la.date))}:</span><span class="mono">${esc(txt)}</span><span class="hint-last">(reps not logged)</span>`;
+      return `${lastLabel(la.date, la.logs)}<span class="mono">${esc(txt)}</span><span class="hint-last">(reps not logged)</span>`;
     }
     if (!p) return `<span class="hint-last">No history yet. Today sets your baseline.</span>`;
     const last = p.last, bw = last.maxW === 0;
     const target = bw ? `${last.maxR + 1} reps` : `${fmtW(last.best.w)}×${last.best.r + 1} or ${fmtW(last.best.w + stepFor(last.best.w))}×${last.best.r}`;
-    return `<span class="hint-last">Last time, ${esc(fmtDate(last.date))}:</span><span class="mono">${esc(setsText(last.sets, bw))}</span><span class="hint-target">Beat it: <b>${esc(target)}</b></span>`;
+    return `${lastLabel(last.date, last.logs)}<span class="mono">${esc(setsText(last.sets, bw))}</span><span class="hint-target">Beat it: <b>${esc(target)}</b></span>`;
   }
   const isPR = (st, p) => !!st.done && beats(num(st.w), Math.round(num(st.r)), p);
   function setNum(st, s, p) {
@@ -904,7 +937,7 @@ input.title-input { font-size: 24px; }
         ${row.extra ? `<button type="button" class="icon-btn remove-extra" aria-label="Remove ${esc(exName(row.ex, row.name))} from today">×</button>` : ""}
       </div>
       <div class="ex-body">
-        <p class="stall-note">No PR in 3 weeks</p>
+        <p class="stall-note">No progress in 3 weeks</p>
         ${row.opts.length > 1 ? `<label class="swap"><span>Doing</span><select class="swap-sel" aria-label="Which variation you did">${row.opts.map(o => `<option value="${esc(o)}"${o === row.ex ? " selected" : ""}>${esc(exName(o))}</option>`).join("")}</select></label>` : ""}
         ${cue ? `<p class="cue"><span class="cue-l">Note</span>${esc(cue)}</p>` : ""}
         <div class="hint">${hintHtml(p, row.ex)}</div>
@@ -1097,6 +1130,11 @@ input.title-input { font-size: 24px; }
   pW.addEventListener("click", e => {
     if (mode === "edit") return onEditClick(e);
     const t = e.target, btn = t.closest("button");
+    if (btn && btn.classList.contains("hint-go")) {
+      const wid = btn.dataset.wid, date = btn.dataset.date;
+      if (wid === sess.wid) goToDate(date); else flush().then(() => openLog(wid, date));   // save what you typed first
+      return;
+    }
     if (btn && btn.id === "editWk") { startEdit(); return; }
     if (btn && btn.id === "addExtra") { addExtra($("#extraName").value); return; }
     if (btn && btn.id === "prevDay") { goToDate(addDays(sess.date, -1)); return; }
@@ -1190,7 +1228,7 @@ input.title-input { font-size: 24px; }
     const item = btn.closest(".ed-item"), k = item ? +item.dataset.k : -1;
     if (btn.id === "edAdd") { d.items.push({ name: "", note: "" }); renderEdit(); const el = $(`#edn-${d.items.length - 1}`); if (el) { el.focus({ preventScroll: true }); el.closest(".ed-item").scrollIntoView({ block: "center" }); } }
     else if (btn.id === "edSave") saveDraft();
-    else if (btn.id === "edCancel") { drafts.delete(pageId); if (d.isNew) location.hash = "#workouts"; else { mode = "log"; sess = null; pendingDate = d.date || null; render(); } }
+    else if (btn.id === "edCancel") { drafts.delete(pageId); if (d.isNew) location.hash = "#workouts"; else { mode = "log"; sess = null; pendingDate = d.date || null; pendingWid = d.wid; render(); } }
     else if (btn.id === "edDelete") {
       confirmDialog("Delete this workout?", `"${tidy(d.name) || (WK.get(d.wid) || {}).name || "This workout"}" will be removed from your workouts. Sessions you've already logged stay in your exercise progress.`)
         .then(ok => { if (ok) deleteWorkout(d.wid); });
@@ -1221,7 +1259,7 @@ input.title-input { font-size: 24px; }
       const body = { name, note: tidy(d.note), order, items: out };
       await db.doc("workouts/" + d.wid).set(body);
       WK.set(d.wid, sWk(d.wid, body));
-      drafts.delete(d.wid); mode = "log"; sess = null; pendingDate = d.date || null;
+      drafts.delete(d.wid); mode = "log"; sess = null; pendingDate = d.date || null; pendingWid = d.wid;
       setStatus("Saved", "ok"); renderDatalist(); render(); window.scrollTo(0, 0);
     } catch (e) {
       d.msg = "Couldn't save the workout. Check your connection and try again."; renderEdit(); setStatus("Not saved", "err");
@@ -1243,14 +1281,14 @@ input.title-input { font-size: 24px; }
       el.innerHTML = `<div class="crumbs"><a href="#workouts">← All workouts</a></div><div class="empty-box">${isLoaded() || !db ? "This workout isn't here anymore." : "Loading your workouts…"}</div>`;
       return;
     }
-    if (pendingDate) { const d = pendingDate; pendingDate = null; buildSession(pageId, d); }
+    if (pendingDate && (!pendingWid || pendingWid === pageId)) { const d = pendingDate; pendingDate = null; pendingWid = null; buildSession(pageId, d); }
     else if (!sess || sess.wid !== pageId) buildSession(pageId, todayStr());
     renderWorkoutLog();
   }
 
   // ---------- Exercises list ----------
   function spark(h, bw) {
-    const pts = (h || []).slice(-12).map(s => bw ? s.sets[0].r : s.sets[0].w * s.sets[0].r);
+    const pts = (h || []).slice(-12).map(s => bw ? s.best.r : s.best.w * s.best.r);
     const W = 80, H = 26;
     if (pts.length < 2) return `<svg class="spark" width="${W}" height="${H}" aria-hidden="true"></svg>`;
     const lo = Math.min(...pts), hi = Math.max(...pts), sp = hi - lo || 1;
@@ -1292,8 +1330,8 @@ input.title-input { font-size: 24px; }
           let stat = '<span class="none">Not logged yet</span>';
           const lastH = h && h.length ? h[h.length - 1] : null, lastWo = wo && wo.length ? wo[wo.length - 1] : null;
           const day = d => `<br><span class="meta">${esc(fmtDate(d, { month: "short", day: "numeric" }))}</span>`;
-          if (lastWo && (!lastH || lastWo.date > lastH.date)) stat = `<span class="mono">${fmtW(lastWo.sets[0].w)} lb</span>${day(lastWo.date)}`;
-          else if (lastH) { const f = lastH.sets[0]; stat = `<span class="mono">${bw ? f.r + " reps" : fmtW(f.w) + "×" + f.r}</span>${day(lastH.date)}`; }
+          if (lastWo && (!lastH || lastWo.date > lastH.date)) stat = `<span class="mono">${fmtW(Math.max(...lastWo.sets.map(x => x.w)))} lb</span>${day(lastWo.date)}`;
+          else if (lastH) { const f = lastH.best; stat = `<span class="mono">${bw ? f.r + " reps" : fmtW(f.w) + "×" + f.r}</span>${day(lastH.date)}`; }
           return `<div class="ex-item${id === justAdded ? " just-added" : ""}"><div class="ex-line"><a class="ex-row" href="#exercise-${esc(id)}"><span><span class="ex-row-name">${esc(exName(id))}</span><span class="ex-row-meta">${uses.length ? esc(uses.join(" · ")) : "Not in a workout"}${n ? " · " + n + " session" + (n === 1 ? "" : "s") : ""}</span></span><span class="ex-row-stat">${stat}</span>${spark(h, bw)}</a>${readOnly ? "" : `<button type="button" class="icon-btn ex-ren" data-id="${esc(id)}" aria-label="Rename ${esc(exName(id))}">${PENCIL}</button><button type="button" class="icon-btn ex-del" data-id="${esc(id)}" aria-label="Delete ${esc(exName(id))}">${TRASH}</button>`}</div></div>`;
         }).join("") : '<p class="empty" style="padding:16px">No exercises match.</p>';
     }
@@ -1508,6 +1546,53 @@ input.title-input { font-size: 24px; }
   }
 
   // ---------- Exercise detail ----------
+  // Calendar: the days you did this exercise. Tap one to see what you logged.
+  let cal = { id: null, month: "", sel: null };
+  const addMonths = (ym, k) => { const d = new Date(+ym.slice(0, 4), +ym.slice(5, 7) - 1 + k, 1); return d.getFullYear() + "-" + String(d.getMonth() + 1).padStart(2, "0"); };
+  function exDays(id) {
+    const m = new Map();
+    LOGS.forEach(l => l.entries.forEach(e => {
+      if (e.ex !== id || !e.sets.length) return;
+      if (!m.has(l.date)) m.set(l.date, []);
+      m.get(l.date).push({ wid: l.workoutId, wname: (WK.get(l.workoutId) || {}).name || l.workoutName || "Workout", sets: e.sets });
+    }));
+    return m;
+  }
+  function calHtml(id) {
+    const days = exDays(id), dates = [...days.keys()].sort(), today = todayStr();
+    if (cal.id !== id) cal = { id, month: (dates[dates.length - 1] || today).slice(0, 7), sel: null };
+    const [y, mo] = cal.month.split("-").map(Number), first = new Date(y, mo - 1, 1), n = new Date(y, mo, 0).getDate();
+    const minM = (dates[0] || today).slice(0, 7), maxM = [today.slice(0, 7), (dates[dates.length - 1] || today).slice(0, 7)].sort()[1];
+    const inMonth = dates.filter(d => d.startsWith(cal.month));
+    const woOnly = d => days.get(d).every(x => x.sets.every(st => !(st.r > 0)));
+    let cells = ["S", "M", "T", "W", "T", "F", "S"].map(w => `<span class="cal-wd" aria-hidden="true">${w}</span>`).join("");
+    for (let i = 0; i < first.getDay(); i++) cells += `<span class="cal-cell" aria-hidden="true"></span>`;
+    for (let d = 1; d <= n; d++) {
+      const ds = cal.month + "-" + String(d).padStart(2, "0"), td = ds === today ? " today" : "";
+      cells += days.has(ds)
+        ? `<button type="button" class="cal-cell cal-day${woOnly(ds) ? " wo" : ""}${td}" data-date="${ds}" aria-pressed="${cal.sel === ds}" aria-label="${esc(fmtDate(ds))}: logged">${d}</button>`
+        : `<span class="cal-cell${td}">${d}</span>`;
+    }
+    const setTxt = sets => sets.map(st => st.w > 0 ? fmtW(st.w) + (st.r > 0 ? "×" + st.r : " lb") : st.r + " reps").join(" · ");
+    let out = `<p class="help" style="margin:0">Tap a highlighted day to see what you logged.</p>`;
+    if (cal.sel && days.has(cal.sel)) {
+      out = days.get(cal.sel).map(x => {
+        const vol = x.sets.reduce((a, st) => a + st.w * st.r, 0);
+        return `<div class="cal-entry"><div class="cal-entry-head"><span><strong>${esc(fmtDate(cal.sel))}</strong> <span class="meta">· ${esc(x.wname)}</span></span>${WK.has(x.wid) ? `<button type="button" class="btn small cal-open" data-wid="${esc(x.wid)}" data-date="${cal.sel}">Open session</button>` : ""}</div>
+          <p class="cal-sets">${esc(setTxt(x.sets))}</p><p class="meta" style="margin:2px 0 0">${x.sets.length} set${x.sets.length === 1 ? "" : "s"}${vol ? " · " + fmtInt(vol) + " lb volume" : x.sets.some(st => !(st.r > 0)) ? " · reps not logged" : ""}</p></div>`;
+      }).join("");
+    }
+    const sub = `${inMonth.length} session${inMonth.length === 1 ? "" : "s"} this month${inMonth.some(woOnly) ? ". Dashed: weight only, no reps" : ""}.`;
+    return `<div class="cal-head">
+        <button type="button" class="icon-btn cal-nav" data-d="-1" aria-label="Previous month" ${cal.month <= minM ? "disabled" : ""}>‹</button>
+        <h2 id="calTitle">${esc(first.toLocaleDateString(undefined, { month: "long", year: "numeric" }))}</h2>
+        <button type="button" class="icon-btn cal-nav" data-d="1" aria-label="Next month" ${cal.month >= maxM ? "disabled" : ""}>›</button>
+      </div>
+      <p class="sub" style="text-align:center">${esc(sub)}</p>
+      <div class="cal-grid">${cells}</div>
+      <div class="cal-out" aria-live="polite">${out}</div>`;
+  }
+  function renderCal() { const el = $("#cal"); if (el) el.innerHTML = calHtml(pageId); }
   const RANGES = [["1m", "1M", 31], ["3m", "3M", 92], ["6m", "6M", 183], ["1y", "1Y", 366], ["all", "All", 0]];
   let chartData = null;
   function renderExercise() {
@@ -1543,7 +1628,7 @@ input.title-input { font-size: 24px; }
     const sessCard = `<div class="card"><h2>Every session</h2><p class="sub">Select a row to open that workout.</p><div class="table-wrap"><table><thead><tr><th>Date</th><th>Sets</th><th class="num">${bw ? "Reps" : "Volume"}</th></tr></thead><tbody>${sessRows}</tbody></table></div></div>`;
     if (!h.length) {
       const where = uses.length ? uses.map(w => `<a href="#workout-${esc(w.id)}">${esc(w.name)}</a>`).join(" or ") : "a workout";
-      el.innerHTML = head + `<div class="stack" style="margin-top:14px"><div class="empty-box">${wo.length ? `So far only weights were logged for this one, without reps, so there's nothing to chart yet. Log reps from ${where} and its progress shows up here.` : `No sets logged yet. Log it from ${where} and its progress shows up here.`}</div>${wo.length ? sessCard : ""}</div>` + delSection(id);
+      el.innerHTML = head + `<div class="stack" style="margin-top:14px"><div class="empty-box">${wo.length ? `So far only weights were logged for this one, without reps, so there's nothing to chart yet. Log reps from ${where} and its progress shows up here.` : `No sets logged yet. Log it from ${where} and its progress shows up here.`}</div>${wo.length ? `<div class="card" id="cal">${calHtml(id)}</div>` + sessCard : ""}</div>` + delSection(id);
       chartData = null; return;
     }
     let tiles = "";
@@ -1567,23 +1652,25 @@ input.title-input { font-size: 24px; }
         <div class="chart-head">
           <h2 id="chartTitle"></h2>
           <div class="seg" role="group" aria-label="Which chart">
-            <button type="button" class="seg-btn" data-m="first" aria-pressed="${chartMode === "first"}">First set</button>
+            <button type="button" class="seg-btn" data-m="top" aria-pressed="${chartMode === "top"}">Top set</button>
             <button type="button" class="seg-btn" data-m="total" aria-pressed="${chartMode === "total"}">Whole session</button>
           </div>
         </div>
         <p class="sub" id="chartSub"></p>
         <div class="chart" id="chart1"></div></div>
+      <div class="card" id="cal">${calHtml(id)}</div>
       <div class="grid2">
         ${bw ? "" : `<div class="card"><h2>Rep records</h2><p class="sub">Heaviest weight you've done for each rep count.</p><div class="table-wrap"><table><thead><tr><th class="num">Reps</th><th class="num">Weight</th><th>Date</th></tr></thead><tbody>${repRows}</tbody></table></div></div>`}
         ${sessCard}
       </div></div>` + delSection(id);
-    const firstOf = s => s.sets[0];
-    const tipFirst = s => { const f = firstOf(s); return `<strong>${esc(fmtDate(s.date))}</strong>${bw ? `First set <span class="v">${f.r} reps</span>` : `First set <span class="v">${fmtW(f.w)}×${f.r}</span><br>Volume <span class="v">${fmtInt(f.w * f.r)} lb</span>`}`; };
+    // top set = heaviest set that session, most reps breaks ties (bodyweight: most reps)
+    const topOf = s => s.best;
+    const tipTop = s => { const f = topOf(s); return `<strong>${esc(fmtDate(s.date))}</strong>${bw ? `Top set <span class="v">${f.r} reps</span>` : `Top set <span class="v">${fmtW(f.w)}×${f.r}</span><br>Volume <span class="v">${fmtInt(f.w * f.r)} lb</span>`}`; };
     const tipTotal = s => `<strong>${esc(fmtDate(s.date))}</strong>${s.sets.length} set${s.sets.length === 1 ? "" : "s"}<br>${bw ? `Total <span class="v">${s.reps} reps</span>` : `Volume <span class="v">${fmtInt(s.vol)} lb</span>`}`;
     chartData = {
-      first: { pts: ss.map(s => ({ t: parseDate(s.date).getTime(), y: bw ? firstOf(s).r : firstOf(s).w * firstOf(s).r, tip: tipFirst(s) })),
-        title: "First set", sub: bw ? "Reps in your first set each session." : "Weight × reps of your first set each session, in lb.",
-        o: { label: "First set " + (bw ? "reps" : "volume") + " over time for " + ex.name, fmt: v => fmtInt(v) } },
+      top: { pts: ss.map(s => ({ t: parseDate(s.date).getTime(), y: bw ? topOf(s).r : topOf(s).w * topOf(s).r, tip: tipTop(s) })),
+        title: "Top set", sub: bw ? "Reps in your best set each session." : "Weight × reps of your heaviest set each session, in lb.",
+        o: { label: "Top set " + (bw ? "reps" : "volume") + " over time for " + ex.name, fmt: v => fmtInt(v) } },
       total: { pts: ss.map(s => ({ t: parseDate(s.date).getTime(), y: bw ? s.reps : s.vol, tip: tipTotal(s) })),
         title: "Whole session", sub: bw ? "Reps added up across every set each session." : "Weight × reps added up across every set each session, in lb.",
         o: { label: "Session " + (bw ? "reps" : "volume") + " over time for " + ex.name, fmt: v => fmtInt(v) } }
@@ -1594,7 +1681,7 @@ input.title-input { font-size: 24px; }
     if (readOnly) return "";
     return `<div style="margin-top:22px" id="delWrap"><button type="button" class="btn quiet-danger ex-del" data-id="${esc(id)}">${TRASH} Delete this exercise</button></div>`;
   }
-  let chartMode = store.get("chart", "first") === "total" ? "total" : "first";
+  let chartMode = store.get("chart", "top") === "total" ? "total" : "top";
   function drawCharts() {
     if (!chartData || page !== "exercise") return;
     const c = chartData[chartMode], el = $("#chart1"); if (!el) return;
@@ -1613,15 +1700,21 @@ input.title-input { font-size: 24px; }
   }
   function openLog(wid, date) {
     if (!WK.has(wid)) return;
-    pendingDate = date; sess = null;
+    pendingDate = date; pendingWid = wid; sess = null;
     location.hash = "#workout-" + wid;
   }
   const pE = $("#pExercise");
   pE.addEventListener("click", e => {
     const ren = e.target.closest(".ex-ren"); if (ren) { renameExercise(ren.dataset.id); return; }
     if (handleDelClick(e, () => { const w = $("#delWrap"); if (w) w.outerHTML = delSection(pageId); })) return;
+    const cn = e.target.closest(".cal-nav");
+    if (cn) { if (!cn.disabled) { cal.month = addMonths(cal.month, +cn.dataset.d); cal.sel = null; renderCal(); } return; }
+    const cd = e.target.closest(".cal-day");
+    if (cd) { cal.sel = cal.sel === cd.dataset.date ? null : cd.dataset.date; renderCal(); return; }
+    const co = e.target.closest(".cal-open");
+    if (co) { openLog(co.dataset.wid, co.dataset.date); return; }
     const sg = e.target.closest(".seg-btn");
-    if (sg) { chartMode = sg.dataset.m; store.set("chart", chartMode); drawCharts(); return; }
+    if (sg) { chartMode = sg.dataset.m === "total" ? "total" : "top"; store.set("chart", chartMode); drawCharts(); return; }
     const rg = e.target.closest(".rg-chip"), row = e.target.closest("tr.link");
     if (rg) { progRange = rg.dataset.r; store.set("range", progRange); renderExercise(); }
     else if (row) openLog(row.dataset.wid, row.dataset.date);
