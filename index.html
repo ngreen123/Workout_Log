@@ -242,6 +242,11 @@ input.title-input:hover { border-color: var(--line); }
 .delta.down { color: var(--critical); }
 .delta.flat { color: var(--ink-3); }
 .chart { position: relative; width: 100%; min-height: 220px; }
+.chart-head { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 8px 12px; }
+.seg { display: inline-flex; border: 1px solid var(--ink); border-radius: 3px; overflow: hidden; }
+.seg-btn { appearance: none; border: 0; background: var(--surface); color: var(--ink-2); font: inherit; font-size: 13px; font-weight: 700; padding: 7px 12px; cursor: pointer; min-height: 34px; }
+.seg-btn + .seg-btn { border-left: 1px solid var(--ink); }
+.seg-btn[aria-pressed="true"] { background: var(--ink); color: var(--surface); }
 .chart svg { display: block; overflow: visible; }
 .ax-text { fill: var(--ink-3); font-family: var(--font-body); font-size: 11px; }
 .end-text { fill: var(--ink); font-family: var(--font-mono); font-size: 12px; font-weight: 500; }
@@ -1184,7 +1189,7 @@ input.title-input { font-size: 24px; }
 
   // ---------- Exercises list ----------
   function spark(h, bw) {
-    const pts = (h || []).slice(-12).map(s => bw ? s.maxR : s.best.e);
+    const pts = (h || []).slice(-12).map(s => bw ? s.sets[0].r : s.sets[0].w * s.sets[0].r);
     const W = 80, H = 26;
     if (pts.length < 2) return `<svg class="spark" width="${W}" height="${H}" aria-hidden="true"></svg>`;
     const lo = Math.min(...pts), hi = Math.max(...pts), sp = hi - lo || 1;
@@ -1224,11 +1229,8 @@ input.title-input { font-size: 24px; }
           const uses = (used.get(id) || []).map(w => w.name);
           let stat = '<span class="none">Not logged yet</span>';
           if (h && h.length) {
-            const last = h[h.length - 1], prev = h[h.length - 2];
-            const m = s => bw ? s.maxR : Math.round(s.best.e);
-            const dv = prev ? m(last) - m(prev) : 0;
-            const d = !prev ? "" : dv > 0 ? `<span class="delta up"><span aria-hidden="true">▲</span> ${dv} ${bw ? "rep" + (dv === 1 ? "" : "s") : "lb"}</span>` : dv < 0 ? `<span class="delta down"><span aria-hidden="true">▼</span> ${-dv} ${bw ? "rep" + (dv === -1 ? "" : "s") : "lb"}</span>` : `<span class="delta flat">no change</span>`;
-            stat = `<span class="mono">${bw ? last.maxR + " reps" : fmtW(last.best.w) + "×" + last.best.r}</span><br>${d || `<span class="meta">${esc(fmtDate(last.date, { month: "short", day: "numeric" }))}</span>`}`;
+            const last = h[h.length - 1], f = last.sets[0];
+            stat = `<span class="mono">${bw ? f.r + " reps" : fmtW(f.w) + "×" + f.r}</span><br><span class="meta">${esc(fmtDate(last.date, { month: "short", day: "numeric" }))}</span>`;
           }
           return `<div class="ex-item"><div class="ex-line"><a class="ex-row" href="#exercise-${esc(id)}"><span><span class="ex-row-name">${esc(exName(id))}</span><span class="ex-row-meta">${uses.length ? esc(uses.join(" · ")) : "Not in a workout"}${h ? " · " + h.length + " session" + (h.length === 1 ? "" : "s") : ""}</span></span><span class="ex-row-stat">${stat}</span>${spark(h, bw)}</a>${readOnly ? "" : `<button type="button" class="icon-btn ex-ren" data-id="${esc(id)}" aria-label="Rename ${esc(exName(id))}">${PENCIL}</button><button type="button" class="icon-btn ex-del" data-id="${esc(id)}" aria-label="Delete ${esc(exName(id))}">${TRASH}</button>`}</div></div>`;
         }).join("") : '<p class="empty" style="padding:16px">No exercises match.</p>';
@@ -1425,7 +1427,6 @@ input.title-input { font-size: 24px; }
     const rg = RANGES.find(r => r[0] === progRange) || RANGES[4];
     const cutoff = rg[2] ? addDays(todayStr(), -rg[2]) : "0000-00-00";
     const ss = h.filter(s => s.date >= cutoff);
-    const metric = s => bw ? s.maxR : s.best.e, unit = bw ? "reps" : "lb";
     const head = `<div class="crumbs"><a href="#exercises">← All exercises</a></div>
       <div class="exd-title"><h2 class="page-title">${esc(ex.name)}</h2>${readOnly ? "" : `<button type="button" class="btn small ex-ren" data-id="${esc(id)}">${PENCIL} Rename</button>`}</div>
       <div class="used">${uses.length ? "In: " + uses.map(w => `<a class="tag" href="#workout-${esc(w.id)}">${esc(w.name)}</a>`).join("") : "Not in any workout"}</div>
@@ -1440,49 +1441,50 @@ input.title-input { font-size: 24px; }
     }
     let tiles = "";
     if (ss.length) {
-      const first = ss[0], last = ss[ss.length - 1];
-      const dv = Math.round(metric(last)) - Math.round(metric(first));
-      const since = esc(fmtDate(first.date, { month: "short", day: "numeric" }));
-      const delta = ss.length < 2 ? `<div class="delta flat">First session in this range</div>`
-        : dv > 0 ? `<div class="delta up"><span aria-hidden="true">▲</span> Up ${dv} ${unit} since ${since}</div>`
-        : dv < 0 ? `<div class="delta down"><span aria-hidden="true">▼</span> Down ${-dv} ${unit} since ${since}</div>`
-        : `<div class="delta flat"><span aria-hidden="true">●</span> No change since ${since}</div>`;
-      let best = ss[0]; ss.forEach(s => { if (metric(s) > metric(best)) best = s; });
-      const recent = ss.filter(s => s.date >= addDays(todayStr(), -28)).length;
+      // best = heaviest weight in range (most reps breaks ties); bodyweight = most reps
+      let best = null;
+      ss.forEach(s => s.sets.forEach(st => {
+        if (!best || (bw ? st.r > best.r : (st.w > best.w || (st.w === best.w && st.r > best.r)))) best = { w: st.w, r: st.r, date: s.date };
+      }));
       tiles = `<div class="tiles">
-        <div class="tile"><div class="tile-label">${bw ? "Best set, latest" : "Estimated 1RM, latest"}</div><div class="tile-value">${fmtInt(metric(last))}<small>${unit}</small></div>${delta}</div>
-        <div class="tile"><div class="tile-label">Best in range</div><div class="tile-value">${bw ? best.maxR + "<small>reps</small>" : fmtW(best.best.w) + "<small>lb</small> ×" + best.best.r}</div><div class="tile-sub">${esc(fmtDate(best.date))}${bw ? "" : " · " + fmtInt(best.best.e) + " lb est. 1RM"}</div></div>
-        <div class="tile"><div class="tile-label">Sessions</div><div class="tile-value">${ss.length}</div><div class="tile-sub">${recent} in the last 4 weeks · last ${esc(fmtDate(last.date))}</div></div>
+        <div class="tile"><div class="tile-label">Best in range</div><div class="tile-value">${bw ? best.r + "<small>reps</small>" : fmtW(best.w) + "<small>lb</small> ×" + best.r}</div><div class="tile-sub">${esc(fmtDate(best.date))}</div></div>
       </div>`;
     }
     const byR = new Map();
     if (!bw) h.forEach(s => s.sets.forEach(st => { if (st.w <= 0) return; const c = byR.get(st.r); if (!c || st.w > c.w) byR.set(st.r, { w: st.w, date: s.date }); }));
-    const repRows = [...byR.entries()].sort((a, b) => a[0] - b[0]).slice(0, 15).map(([r, v]) => `<tr><td class="num">${r}</td><td class="num">${fmtW(v.w)} lb</td><td class="num">${fmtInt(e1rm(v.w, r))} lb</td><td>${esc(fmtDate(v.date))}</td></tr>`).join("");
+    const repRows = [...byR.entries()].sort((a, b) => a[0] - b[0]).slice(0, 15).map(([r, v]) => `<tr><td class="num">${r}</td><td class="num">${fmtW(v.w)} lb</td><td>${esc(fmtDate(v.date))}</td></tr>`).join("");
     const sessRows = h.slice().reverse().map(s => {
       const lg = s.logs.find(x => WK.has(x.wid)) || s.logs[0];
       const can = lg && WK.has(lg.wid);
-      return `<tr class="${can ? "link" : ""}" ${can ? `data-wid="${esc(lg.wid)}" data-date="${s.date}" tabindex="0"` : ""}><td>${esc(fmtDate(s.date))}<br><span class="meta">${esc(s.logs.map(x => x.wname).join(", "))}</span></td><td class="mono">${esc(setsText(s.sets, s.maxW === 0))}</td><td class="num">${bw ? s.maxR : fmtInt(s.best.e)}</td></tr>`;
+      return `<tr class="${can ? "link" : ""}" ${can ? `data-wid="${esc(lg.wid)}" data-date="${s.date}" tabindex="0"` : ""}><td>${esc(fmtDate(s.date))}<br><span class="meta">${esc(s.logs.map(x => x.wname).join(", "))}</span></td><td class="mono">${esc(setsText(s.sets, s.maxW === 0))}</td><td class="num">${bw ? s.reps : fmtInt(s.vol)}</td></tr>`;
     }).join("");
     el.innerHTML = head + `<div class="stack" style="margin-top:14px">
       <div class="range chips" role="group" aria-label="Time range">${RANGES.map(r => `<button type="button" class="chip rg-chip" data-r="${r[0]}" aria-pressed="${r[0] === rg[0]}">${r[1]}</button>`).join("")}</div>
       ${tiles}
-      <div class="card"><h2>${bw ? "Best set (reps)" : "Estimated 1RM"}</h2>
-        <p class="sub">${bw ? "Most reps in a single set each session." : "Your best set each session, converted to a one-rep max: weight × (1 + reps ÷ 30). It rises when you add weight or reps."}</p>
+      <div class="card">
+        <div class="chart-head">
+          <h2 id="chartTitle"></h2>
+          <div class="seg" role="group" aria-label="Which chart">
+            <button type="button" class="seg-btn" data-m="first" aria-pressed="${chartMode === "first"}">First set</button>
+            <button type="button" class="seg-btn" data-m="total" aria-pressed="${chartMode === "total"}">Whole session</button>
+          </div>
+        </div>
+        <p class="sub" id="chartSub"></p>
         <div class="chart" id="chart1"></div></div>
-      <div class="card"><h2>${bw ? "Total reps per session" : "Volume per session"}</h2>
-        <p class="sub">${bw ? "All reps across every set." : "Weight × reps, summed over every set, in lb."}</p>
-        <div class="chart" id="chart2" style="min-height:200px"></div></div>
       <div class="grid2">
-        ${bw ? "" : `<div class="card"><h2>Rep records</h2><p class="sub">Heaviest weight you've done for each rep count.</p><div class="table-wrap"><table><thead><tr><th class="num">Reps</th><th class="num">Weight</th><th class="num">Est. 1RM</th><th>Date</th></tr></thead><tbody>${repRows}</tbody></table></div></div>`}
-        <div class="card"><h2>Every session</h2><p class="sub">Select a row to open that workout.</p><div class="table-wrap"><table><thead><tr><th>Date</th><th>Sets</th><th class="num">${bw ? "Best" : "e1RM"}</th></tr></thead><tbody>${sessRows}</tbody></table></div></div>
+        ${bw ? "" : `<div class="card"><h2>Rep records</h2><p class="sub">Heaviest weight you've done for each rep count.</p><div class="table-wrap"><table><thead><tr><th class="num">Reps</th><th class="num">Weight</th><th>Date</th></tr></thead><tbody>${repRows}</tbody></table></div></div>`}
+        <div class="card"><h2>Every session</h2><p class="sub">Select a row to open that workout.</p><div class="table-wrap"><table><thead><tr><th>Date</th><th>Sets</th><th class="num">${bw ? "Reps" : "Volume"}</th></tr></thead><tbody>${sessRows}</tbody></table></div></div>
       </div></div>` + delSection(id);
-    const tip1 = s => `<strong>${esc(fmtDate(s.date))}</strong>${bw ? `Best set <span class="v">${s.maxR} reps</span>` : `Best set <span class="v">${fmtW(s.best.w)}×${s.best.r}</span><br>Est. 1RM <span class="v">${fmtInt(s.best.e)} lb</span>`}`;
-    const tip2 = s => `<strong>${esc(fmtDate(s.date))}</strong>${s.sets.length} sets · <span class="v">${bw ? s.reps + " reps" : fmtInt(s.vol) + " lb"}</span>`;
+    const firstOf = s => s.sets[0];
+    const tipFirst = s => { const f = firstOf(s); return `<strong>${esc(fmtDate(s.date))}</strong>${bw ? `First set <span class="v">${f.r} reps</span>` : `First set <span class="v">${fmtW(f.w)}×${f.r}</span><br>Volume <span class="v">${fmtInt(f.w * f.r)} lb</span>`}`; };
+    const tipTotal = s => `<strong>${esc(fmtDate(s.date))}</strong>${s.sets.length} set${s.sets.length === 1 ? "" : "s"}<br>${bw ? `Total <span class="v">${s.reps} reps</span>` : `Volume <span class="v">${fmtInt(s.vol)} lb</span>`}`;
     chartData = {
-      p1: ss.map(s => ({ t: parseDate(s.date).getTime(), y: metric(s), tip: tip1(s) })),
-      p2: ss.map(s => ({ t: parseDate(s.date).getTime(), y: bw ? s.reps : s.vol, tip: tip2(s) })),
-      o1: { label: (bw ? "Best set reps" : "Estimated one-rep max") + " over time for " + ex.name, fmt: v => fmtInt(v) },
-      o2: { label: (bw ? "Total reps" : "Volume") + " per session for " + ex.name }
+      first: { pts: ss.map(s => ({ t: parseDate(s.date).getTime(), y: bw ? firstOf(s).r : firstOf(s).w * firstOf(s).r, tip: tipFirst(s) })),
+        title: "First set", sub: bw ? "Reps in your first set each session." : "Weight × reps of your first set each session, in lb.",
+        o: { label: "First set " + (bw ? "reps" : "volume") + " over time for " + ex.name, fmt: v => fmtInt(v) } },
+      total: { pts: ss.map(s => ({ t: parseDate(s.date).getTime(), y: bw ? s.reps : s.vol, tip: tipTotal(s) })),
+        title: "Whole session", sub: bw ? "Reps added up across every set each session." : "Weight × reps added up across every set each session, in lb.",
+        o: { label: "Session " + (bw ? "reps" : "volume") + " over time for " + ex.name, fmt: v => fmtInt(v) } }
     };
     drawCharts(); observeCharts();
   }
@@ -1490,11 +1492,13 @@ input.title-input { font-size: 24px; }
     if (readOnly) return "";
     return `<div style="margin-top:22px" id="delWrap"><button type="button" class="btn quiet-danger ex-del" data-id="${esc(id)}">${TRASH} Delete this exercise</button></div>`;
   }
+  let chartMode = store.get("chart", "first") === "total" ? "total" : "first";
   function drawCharts() {
     if (!chartData || page !== "exercise") return;
-    const c1 = $("#chart1"), c2 = $("#chart2");
-    if (c1) drawLine(c1, chartData.p1, chartData.o1);
-    if (c2) drawCols(c2, chartData.p2, chartData.o2);
+    const c = chartData[chartMode], el = $("#chart1"); if (!el) return;
+    $("#chartTitle").textContent = c.title; $("#chartSub").textContent = c.sub;
+    $$(".seg-btn").forEach(b => b.setAttribute("aria-pressed", String(b.dataset.m === chartMode)));
+    drawLine(el, c.pts, c.o);
   }
   let ro = null, roW = 0, rafId = 0;
   function observeCharts() {
@@ -1514,6 +1518,8 @@ input.title-input { font-size: 24px; }
   pE.addEventListener("click", e => {
     const ren = e.target.closest(".ex-ren"); if (ren) { renameExercise(ren.dataset.id); return; }
     if (handleDelClick(e, () => { const w = $("#delWrap"); if (w) w.outerHTML = delSection(pageId); })) return;
+    const sg = e.target.closest(".seg-btn");
+    if (sg) { chartMode = sg.dataset.m; store.set("chart", chartMode); drawCharts(); return; }
     const rg = e.target.closest(".rg-chip"), row = e.target.closest("tr.link");
     if (rg) { progRange = rg.dataset.r; store.set("range", progRange); renderExercise(); }
     else if (row) openLog(row.dataset.wid, row.dataset.date);
