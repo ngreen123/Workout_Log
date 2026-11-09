@@ -296,6 +296,11 @@ tr.link:hover td { background: var(--accent-wash); }
 .modal-box.ask { border-top-color: var(--accent); }
 #modalInput { margin: 0 0 8px; font-size: 16px; font-weight: 600; }
 #modalErr { margin: 0 0 12px; }
+#modalPick { margin: 4px 0 14px; }
+#modalPick label { display: block; font-size: 13px; font-weight: 600; color: var(--ink-2); margin: 0 0 4px; }
+#modalSelect { font-size: 16px; }
+.ex-item.just-added { background: var(--accent-wash); }
+@media (prefers-reduced-motion: no-preference) { .ex-item { transition: background-color 1.2s; } }
 /* Exercise name suggestions (inline, so the page keeps scrolling) */
 .pick { position: relative; flex: 1; min-width: 0; }
 .pick .ex-pick { padding-right: 42px; }
@@ -363,6 +368,7 @@ input.title-input { font-size: 24px; }
       <label class="sr" for="modalInput">Name</label>
       <input type="text" id="modalInput" autocomplete="off" hidden>
       <p id="modalErr" class="form-msg" hidden></p>
+      <div id="modalPick" hidden><label for="modalSelect">Add to a workout</label><select id="modalSelect"></select></div>
       <div class="modal-actions">
         <button type="button" class="btn" id="modalCancel">Cancel</button>
         <button type="button" class="btn danger" id="modalOk">Delete</button>
@@ -390,7 +396,6 @@ input.title-input { font-size: 24px; }
   const fmtDate = (s, o) => parseDate(s).toLocaleDateString(undefined, o || { weekday: "short", month: "short", day: "numeric" });
   const fmtW = w => (Math.round(w * 10) / 10).toLocaleString();
   const fmtInt = v => Math.round(v).toLocaleString();
-  const e1rm = (w, r) => (!(r > 0) || !(w > 0)) ? 0 : (r === 1 ? w : w * (1 + r / 30));
   const isDate = s => typeof s === "string" && /^\d{4}-\d{2}-\d{2}$/.test(s);
   const rid = () => Math.random().toString(36).slice(2, 8);
   const slugify = s => norm(s).replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 40) || "item";
@@ -408,7 +413,8 @@ input.title-input { font-size: 24px; }
   let EX = new Map();   // id -> {id, name, note}
   let WK = new Map();   // id -> {id, name, note, order, items:[{ex, alts:[], note}]}
   let LOGS = new Map(); // id -> {id, date, workoutId, workoutName, note, entries:[{ex, name, sets:[{w,r}]}]}
-  let HIST = new Map(); // exercise id -> [summary per date]
+  let HIST = new Map(); // exercise id -> [summary per date], sets with reps only
+  let WONLY = new Map(); // exercise id -> [{date, sets, logs}] for days when only weights were logged (no reps)
   let page = "workouts", pageId = "", mode = "log";
   let sess = null;
   const drafts = new Map();
@@ -445,9 +451,9 @@ input.title-input { font-size: 24px; }
   function summarize(date, sets) {
     let best = null, vol = 0, reps = 0, maxW = 0, maxR = 0;
     sets.forEach(st => {
-      const e = e1rm(st.w, st.r);
       vol += st.w * st.r; reps += st.r; maxW = Math.max(maxW, st.w); maxR = Math.max(maxR, st.r);
-      if (!best || e > best.e || (e === best.e && st.r > best.r)) best = { w: st.w, r: st.r, e };
+      // best set = heaviest weight, most reps breaks ties
+      if (!best || st.w > best.w || (st.w === best.w && st.r > best.r)) best = { w: st.w, r: st.r };
     });
     return { date, sets, best, vol, reps, maxW, maxR };
   }
@@ -455,25 +461,30 @@ input.title-input { font-size: 24px; }
     const h = new Map();
     [...LOGS.values()].sort((a, b) => a.date < b.date ? -1 : a.date > b.date ? 1 : 0).forEach(l => {
       l.entries.forEach(e => {
-        const sets = e.sets.filter(s => s.r > 0);   // a set counts toward progress once it has reps
-        if (!sets.length) return;
+        if (!e.sets.length) return;
         if (!h.has(e.ex)) h.set(e.ex, new Map());
         const byDate = h.get(e.ex);
-        if (!byDate.has(l.date)) byDate.set(l.date, { date: l.date, sets: [], logs: [] });
+        if (!byDate.has(l.date)) byDate.set(l.date, { date: l.date, sets: [], all: [], logs: [] });
         const d = byDate.get(l.date);
-        d.sets.push(...sets);
+        d.all.push(...e.sets);
+        d.sets.push(...e.sets.filter(st => st.r > 0));   // a set counts toward progress once it has reps
         if (!d.logs.some(x => x.id === l.id)) d.logs.push({ id: l.id, wid: l.workoutId, wname: (WK.get(l.workoutId) || {}).name || l.workoutName || "Workout" });
       });
     });
-    HIST = new Map();
-    h.forEach((byDate, ex) => HIST.set(ex, [...byDate.values()].map(d => Object.assign(summarize(d.date, d.sets), { logs: d.logs }))));
+    HIST = new Map(); WONLY = new Map();
+    h.forEach((byDate, ex) => {
+      const days = [...byDate.values()], withReps = days.filter(d => d.sets.length), wo = days.filter(d => !d.sets.length);
+      if (withReps.length) HIST.set(ex, withReps.map(d => Object.assign(summarize(d.date, d.sets), { logs: d.logs })));
+      if (wo.length) WONLY.set(ex, wo.map(d => ({ date: d.date, sets: d.all, logs: d.logs })));
+    });
   }
+  const dayCount = id => (HIST.get(id) || []).length + (WONLY.get(id) || []).length;
   function priorFor(ex, date) {
     const h = HIST.get(ex); if (!h) return null;
     const prior = h.filter(s => s.date < date); if (!prior.length) return null;
-    let bestE = 0, bestR0 = 0;
-    prior.forEach(s => s.sets.forEach(st => { bestE = Math.max(bestE, e1rm(st.w, st.r)); if (st.w === 0) bestR0 = Math.max(bestR0, st.r); }));
-    return { last: prior[prior.length - 1], bestE, bestR0 };
+    const sets = []; let maxW = 0, bestR0 = 0;
+    prior.forEach(s => s.sets.forEach(st => { if (st.w > 0) { sets.push(st); maxW = Math.max(maxW, st.w); } else bestR0 = Math.max(bestR0, st.r); }));
+    return { last: prior[prior.length - 1], sets, maxW, bestR0 };
   }
   function usedInMap() {
     const m = new Map();
@@ -506,10 +517,14 @@ input.title-input { font-size: 24px; }
       box.classList.toggle("ask", !cfg.danger);
       inp.hidden = cfg.input == null; inp.value = cfg.input == null ? "" : cfg.input;
       $("#modalErr").hidden = true;
+      const pick = $("#modalPick"), sel = $("#modalSelect");
+      pick.hidden = !cfg.choices;
+      if (cfg.choices) { sel.innerHTML = cfg.choices.map(c => `<option value="${esc(c.v)}">${esc(c.t)}</option>`).join(""); sel.value = cfg.choice || ""; }
       // If the page is shown as one tall frame (no inner scrolling), open the dialog next to the button that was tapped.
       const tall = window.innerHeight > (screen.availHeight || screen.height || 1200) + 60;
       const r = modalReturn && modalReturn.getBoundingClientRect ? modalReturn.getBoundingClientRect() : null;
       if (tall && r) { m.style.alignItems = "start"; box.style.marginTop = Math.max(16, Math.min(r.top - 140, window.innerHeight - 320)) + "px"; }
+      else if (cfg.input != null && window.innerWidth < 600) { m.style.alignItems = "start"; box.style.marginTop = "min(8vh, 60px)"; }
       else { m.style.alignItems = ""; box.style.marginTop = ""; }
       m.hidden = false;
       const first = cfg.input == null ? $("#modalCancel") : inp;
@@ -531,7 +546,7 @@ input.title-input { font-size: 24px; }
     if (modalCfg.input == null) return closeModal(true);
     const v = tidy($("#modalInput").value), err = modalCfg.validate ? modalCfg.validate(v) : "";
     if (err) { const el = $("#modalErr"); el.textContent = err; el.hidden = false; $("#modalInput").focus(); return; }
-    closeModal(v);
+    closeModal(modalCfg.choices ? { name: v, choice: $("#modalSelect").value } : v);
   }
   const modalCancel = () => closeModal(modalCfg && modalCfg.input != null ? null : false);
   $("#modalOk").addEventListener("click", modalOk);
@@ -543,7 +558,7 @@ input.title-input { font-size: 24px; }
     if (e.key === "Escape") modalCancel();
     else if (e.key === "Enter" && e.target.id === "modalInput") { e.preventDefault(); modalOk(); }
     else if (e.key === "Tab") {
-      const f = $$(".modal-box input:not([hidden]), .modal-box button"), i = f.indexOf(document.activeElement);
+      const f = $$(".modal-box input:not([hidden]), #modalPick:not([hidden]) select, .modal-box button"), i = f.indexOf(document.activeElement);
       if (!e.shiftKey && i === f.length - 1) { e.preventDefault(); f[0].focus(); }
       else if (e.shiftKey && i <= 0) { e.preventDefault(); f[f.length - 1].focus(); }
     }
@@ -725,8 +740,20 @@ input.title-input { font-size: 24px; }
 
   // ---------- Build a session (one workout on one date) ----------
   // Suggested sets: last session's weight × reps for this exercise, shown grey until you confirm or change them.
+  function lastAnyFor(ex, date) {
+    let best = null;
+    LOGS.forEach(l => {
+      if (l.date >= date || (best && l.date <= best.date)) return;
+      const sets = [];
+      l.entries.forEach(e => { if (e.ex === ex) sets.push(...e.sets); });
+      if (sets.length) best = { date: l.date, sets };
+    });
+    return best;
+  }
   function suggestedSets(ex, date) {
-    const p = priorFor(ex, date);
+    const p = priorFor(ex, date), la = lastAnyFor(ex, date);
+    // weights you logged without reps still pre-fill the weight
+    if (la && (!p || la.date > p.last.date)) return la.sets.slice(0, 10).map(s => ({ w: String(s.w), r: s.r ? String(s.r) : "", done: false, ws: true, rs: true }));
     if (!p) return Array.from({ length: 3 }, () => ({ w: "", r: "", done: false, ws: true, rs: true }));
     return p.last.sets.slice(0, 10).map(s => ({ w: String(s.w), r: String(s.r), done: false, ws: true, rs: true }));
   }
@@ -806,7 +833,12 @@ input.title-input { font-size: 24px; }
   });
 
   // ---------- Workout: log mode ----------
-  function hintHtml(p) {
+  function hintHtml(p, ex) {
+    const la = ex && sess ? lastAnyFor(ex, sess.date) : null;
+    if (la && (!p || la.date > p.last.date) && la.sets.some(s => !(s.r > 0))) {
+      const txt = la.sets.map(s => fmtW(s.w) + (s.r > 0 ? "×" + s.r : " lb")).join(" · ");
+      return `<span class="hint-last">Last time, ${esc(fmtDate(la.date))}:</span><span class="mono">${esc(txt)}</span><span class="hint-last">(reps not logged)</span>`;
+    }
     if (!p) return `<span class="hint-last">No history yet. Today sets your baseline.</span>`;
     const last = p.last, bw = last.maxW === 0;
     const target = bw ? `${last.maxR + 1} reps` : `${fmtW(last.best.w)}×${last.best.r + 1} or ${fmtW(last.best.w + stepFor(last.best.w))}×${last.best.r}`;
@@ -815,7 +847,12 @@ input.title-input { font-size: 24px; }
   function isPR(st, p) {
     const w = num(st.w), r = Math.round(num(st.r));
     if (!st.done || !(r > 0) || !p) return false;
-    return w > 0 ? (p.bestE > 0 && e1rm(w, r) > p.bestE + 1e-9) : (p.bestR0 > 0 && r > p.bestR0);
+    if (!(w > 0)) return p.bestR0 > 0 && r > p.bestR0;
+    if (!p.sets.length) return false;
+    // a real record: no set you've done matches it on both weight and reps,
+    // and it's either your heaviest weight ever or it beats a set you've done (more weight, more reps, or both)
+    if (p.sets.some(x => x.w >= w && x.r >= r)) return false;
+    return w > p.maxW || p.sets.some(x => x.w <= w && x.r <= r);
   }
   function setNum(st, s, p) {
     return isPR(st, p) ? `<span class="set-n pr" title="Set ${s + 1}: a personal record">PR</span>` : `<span class="set-n">${s + 1}</span>`;
@@ -848,7 +885,7 @@ input.title-input { font-size: 24px; }
       <div class="ex-body">
         ${row.opts.length > 1 ? `<label class="swap"><span>Doing</span><select class="swap-sel" aria-label="Which variation you did">${row.opts.map(o => `<option value="${esc(o)}"${o === row.ex ? " selected" : ""}>${esc(exName(o))}</option>`).join("")}</select></label>` : ""}
         ${cue ? `<p class="cue"><span class="cue-l">Note</span>${esc(cue)}</p>` : ""}
-        <div class="hint">${hintHtml(p)}</div>
+        <div class="hint">${hintHtml(p, row.ex)}</div>
         <div class="sets">
           <div class="set-row head" aria-hidden="true"><span>Set</span><span>Weight (lb)</span><span></span><span>Reps</span><span></span></div>
           ${row.sets.map((st, s) => setRow(row, st, i, s, p)).join("")}
@@ -877,7 +914,7 @@ input.title-input { font-size: 24px; }
       <thead><tr><th>Date</th><th>Logged</th><th></th></tr></thead><tbody>
       ${logs.map(l => {
         const sets = l.entries.reduce((a, e) => a + e.sets.length, 0);
-        return `<tr class="${l.id === sess.logId ? "current" : ""}" data-date="${l.date}" tabindex="0"><td>${esc(fmtDate(l.date))}${l.id === sess.logId ? ' <span class="tag">Viewing</span>' : ""}</td><td>${l.entries.length} exercise${l.entries.length === 1 ? "" : "s"} · ${sets} sets</td>
+        return `<tr class="${l.id === sess.logId ? "current" : ""}" data-date="${l.date}" tabindex="0"><td>${esc(fmtDate(l.date))}${l.id === sess.logId ? ' <span class="tag">Viewing</span>' : ""}</td><td>${l.entries.length} exercise${l.entries.length === 1 ? "" : "s"} · ${sets} set${sets === 1 ? "" : "s"}</td>
         <td class="num">${readOnly ? "" : `<button type="button" class="btn small del-log" data-id="${esc(l.id)}">Delete</button>`}</td></tr>`;
       }).join("")}
       </tbody></table></div></div>`;
@@ -948,7 +985,7 @@ input.title-input { font-size: 24px; }
     $$(".log-rows .ex").forEach(card => {
       const row = sess.rows[+card.dataset.i]; if (!row) return;
       const p = priorFor(row.ex, sess.date);
-      $(".hint", card).innerHTML = hintHtml(p);
+      $(".hint", card).innerHTML = hintHtml(p, row.ex);
       row.sets.forEach((st, s) => syncRow(card, row, s, p));
     });
     $("#sessMeta").innerHTML = sessMetaHtml();
@@ -1012,7 +1049,7 @@ input.title-input { font-size: 24px; }
   pW.addEventListener("change", e => {
     if (mode === "edit") return;
     const t = e.target;
-    if (t.id === "logDate") { goToDate(t.value); return; }
+    if (t.id === "logDate") { if (!isDate(t.value)) t.value = sess.date; else goToDate(t.value); return; }
     if (t.matches(".set-row input") || t.id === "sessNote") { if (dirty) save(); return; }
     if (t.classList.contains("swap-sel")) {
       const i = +t.closest(".ex").dataset.i, row = sess.rows[i];
@@ -1201,19 +1238,20 @@ input.title-input { font-size: 24px; }
     const el = $("#pExercises");
     const used = usedInMap(), wks = workoutsSorted();
     if (exFilter !== "all" && !WK.has(exFilter)) exFilter = "all";
-    const ids = new Set([...EX.keys(), ...HIST.keys()]);
+    const ids = new Set([...EX.keys(), ...HIST.keys(), ...WONLY.keys()]);
     let list;
     if (exFilter === "all") list = [...ids].sort((a, b) => exName(a).localeCompare(exName(b)));
     else { list = []; WK.get(exFilter).items.forEach(it => [it.ex, ...it.alts].forEach(x => { if (!list.includes(x)) list.push(x); })); }
     const q = norm(exSearch);
     if (q) list = list.filter(id => norm(exName(id)).includes(q));
     const hadFocus = document.activeElement && document.activeElement.id === "exSearch";
+    const newExBtn = readOnly || !db ? "" : '<button type="button" class="btn" id="newEx">+ New exercise</button>';
     if (!ids.size) {
-      el.innerHTML = `<div class="page-head"><h2 class="page-title">Exercises</h2></div><div class="empty-box">${isLoaded() || !db ? "Exercises show up here once they're in a workout." : "Loading your exercises…"}</div>`;
+      el.innerHTML = `<div class="page-head"><h2 class="page-title">Exercises</h2>${newExBtn}</div><div class="empty-box">${isLoaded() || !db ? "No exercises yet. Add one here, or add them to a workout." : "Loading your exercises…"}</div>`;
       return;
     }
     if (searchOnly && $("#exList")) { $("#exList").innerHTML = listHtml(); return; }
-    el.innerHTML = `<div class="page-head"><div><h2 class="page-title">Exercises</h2><p class="sub">Select an exercise to see how it's progressing.</p></div></div>
+    el.innerHTML = `<div class="page-head"><div><h2 class="page-title">Exercises</h2><p class="sub">Select an exercise to see how it's progressing.</p></div>${newExBtn}</div>
       <div class="filters">
         <div class="chips" role="group" aria-label="Filter by workout">
           <button type="button" class="chip f-chip" data-f="all" aria-pressed="${exFilter === "all"}">All</button>
@@ -1225,18 +1263,19 @@ input.title-input { font-size: 24px; }
     if (hadFocus) { const s = $("#exSearch"); s.focus(); s.setSelectionRange(s.value.length, s.value.length); }
     function listHtml() {
       return list.length ? list.map(id => {
-          const h = HIST.get(id), bw = h ? h.every(s => s.maxW === 0) : false;
+          const h = HIST.get(id), bw = h ? h.every(s => s.maxW === 0) : false, wo = WONLY.get(id), n = dayCount(id);
           const uses = (used.get(id) || []).map(w => w.name);
           let stat = '<span class="none">Not logged yet</span>';
-          if (h && h.length) {
-            const last = h[h.length - 1], f = last.sets[0];
-            stat = `<span class="mono">${bw ? f.r + " reps" : fmtW(f.w) + "×" + f.r}</span><br><span class="meta">${esc(fmtDate(last.date, { month: "short", day: "numeric" }))}</span>`;
-          }
-          return `<div class="ex-item"><div class="ex-line"><a class="ex-row" href="#exercise-${esc(id)}"><span><span class="ex-row-name">${esc(exName(id))}</span><span class="ex-row-meta">${uses.length ? esc(uses.join(" · ")) : "Not in a workout"}${h ? " · " + h.length + " session" + (h.length === 1 ? "" : "s") : ""}</span></span><span class="ex-row-stat">${stat}</span>${spark(h, bw)}</a>${readOnly ? "" : `<button type="button" class="icon-btn ex-ren" data-id="${esc(id)}" aria-label="Rename ${esc(exName(id))}">${PENCIL}</button><button type="button" class="icon-btn ex-del" data-id="${esc(id)}" aria-label="Delete ${esc(exName(id))}">${TRASH}</button>`}</div></div>`;
+          const lastH = h && h.length ? h[h.length - 1] : null, lastWo = wo && wo.length ? wo[wo.length - 1] : null;
+          const day = d => `<br><span class="meta">${esc(fmtDate(d, { month: "short", day: "numeric" }))}</span>`;
+          if (lastWo && (!lastH || lastWo.date > lastH.date)) stat = `<span class="mono">${fmtW(lastWo.sets[0].w)} lb</span>${day(lastWo.date)}`;
+          else if (lastH) { const f = lastH.sets[0]; stat = `<span class="mono">${bw ? f.r + " reps" : fmtW(f.w) + "×" + f.r}</span>${day(lastH.date)}`; }
+          return `<div class="ex-item${id === justAdded ? " just-added" : ""}"><div class="ex-line"><a class="ex-row" href="#exercise-${esc(id)}"><span><span class="ex-row-name">${esc(exName(id))}</span><span class="ex-row-meta">${uses.length ? esc(uses.join(" · ")) : "Not in a workout"}${n ? " · " + n + " session" + (n === 1 ? "" : "s") : ""}</span></span><span class="ex-row-stat">${stat}</span>${spark(h, bw)}</a>${readOnly ? "" : `<button type="button" class="icon-btn ex-ren" data-id="${esc(id)}" aria-label="Rename ${esc(exName(id))}">${PENCIL}</button><button type="button" class="icon-btn ex-del" data-id="${esc(id)}" aria-label="Delete ${esc(exName(id))}">${TRASH}</button>`}</div></div>`;
         }).join("") : '<p class="empty" style="padding:16px">No exercises match.</p>';
     }
   }
   $("#pExercises").addEventListener("click", e => {
+    if (e.target.closest("#newEx")) { addExercise(); return; }
     const ren = e.target.closest(".ex-ren"); if (ren) { e.preventDefault(); renameExercise(ren.dataset.id); return; }
     if (handleDelClick(e, renderExercises)) return;
     const c = e.target.closest(".f-chip"); if (!c) return;
@@ -1247,9 +1286,9 @@ input.title-input { font-size: 24px; }
   const PENCIL = '<svg viewBox="0 0 20 20" aria-hidden="true"><path d="M13.5 3.5l3 3L7 16H4v-3z M11.5 5.5l3 3" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round"/></svg>';
   const TRASH = '<svg viewBox="0 0 20 20" aria-hidden="true"><path d="M4 6h12M8 6V4h4v2M6 6l.8 10h6.4L14 6" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg>';
   function delMessage(id) {
-    const h = HIST.get(id) || [], uses = (usedInMap().get(id) || []).map(w => w.name);
+    const uses = (usedInMap().get(id) || []).map(w => w.name);
     const list = a => a.length < 3 ? a.join(" and ") : a.slice(0, -1).join(", ") + ", and " + a[a.length - 1];
-    const n = exName(id), s = h.length;
+    const n = exName(id), s = dayCount(id);
     if (uses.length && s) return `"${n}" will be removed from ${list(uses)}, and its ${s} logged session${s === 1 ? "" : "s"} will be erased. This can't be undone.`;
     if (uses.length) return `"${n}" will be removed from ${list(uses)}. You haven't logged it yet, so no history is lost.`;
     if (s) return `"${n}" and its ${s} logged session${s === 1 ? "" : "s"} will be erased. This can't be undone.`;
@@ -1262,6 +1301,36 @@ input.title-input { font-size: 24px; }
     confirmDialog("Delete this exercise?", delMessage(id)).then(ok => { if (ok) deleteExercise(id); });
     return true;
   }
+  let justAdded = null, justAddedTimer = null;
+  async function addExercise() {
+    if (!db || readOnly) return;
+    const choices = [{ v: "", t: "Not now" }].concat(workoutsSorted().map(w => ({ v: w.id, t: w.name })));
+    const r = await openModal({
+      title: "New exercise", body: "You can put it in a workout now, or later with Edit workout.", ok: "Add", danger: false, input: "",
+      choices, choice: exFilter !== "all" && WK.has(exFilter) ? exFilter : "",
+      validate: val => !val ? "Type a name." : [...EX.values()].some(x => norm(x.name) === norm(val)) ? `You already have an exercise called "${val}".` : ""
+    });
+    if (!r || typeof r.name !== "string" || !r.name) return;
+    const name = r.name, w = r.choice ? WK.get(r.choice) : null;
+    let id = slugify(name); if (EX.has(id) || HIST.has(id) || WONLY.has(id)) id += "-" + rid();
+    try {
+      setStatus("Saving…", "busy");
+      if (w) await flush();
+      await db.doc("exercises/" + id).set({ name, note: "" });
+      EX.set(id, { id, name, note: "" });
+      if (w) {
+        const body = { name: w.name, note: w.note, order: w.order, items: w.items.map(it => ({ ex: it.ex, alts: it.alts, note: it.note })).concat([{ ex: id, alts: [], note: "" }]) };
+        await db.doc("workouts/" + w.id).set(body); WK.set(w.id, sWk(w.id, body)); sess = null;
+        const d = drafts.get(w.id); if (d) d.items.push({ name, note: "" });
+      }
+      setStatus("Added", "ok"); renderDatalist();
+      if (exFilter !== "all" && !(w && w.id === exFilter)) { exFilter = "all"; store.set("exFilter", exFilter); }
+      exSearch = ""; justAdded = id; clearTimeout(justAddedTimer);
+      renderExercises();
+      setTimeout(() => { const a = $(`#pExercises .ex-row[href="#exercise-${id}"]`); if (a) a.scrollIntoView({ block: "center" }); }, 0);
+      justAddedTimer = setTimeout(() => { justAdded = null; $$("#pExercises .just-added").forEach(x => x.classList.remove("just-added")); }, 1600);
+    } catch (e) { setStatus("Couldn't add", "err"); }
+  }
   async function renameExercise(id) {
     if (!db || readOnly) return;
     const cur = exName(id);
@@ -1273,6 +1342,7 @@ input.title-input { font-size: 24px; }
       setStatus("Saving…", "busy");
       await db.doc("exercises/" + id).set({ name: v, note: ex.note || "" });
       EX.set(id, { id, name: v, note: ex.note || "" });
+      drafts.forEach(d => d.items.forEach(it => { if (norm(it.name) === norm(cur)) it.name = v; }));
       setStatus("Renamed", "ok"); renderDatalist(); render();
     } catch (e) { setStatus("Couldn't rename", "err"); }
   }
@@ -1299,7 +1369,9 @@ input.title-input { font-size: 24px; }
         }
         clearBackup(l.id);
       }
+      const gone = norm(exName(id));
       await db.doc("exercises/" + id).delete(); EX.delete(id);
+      drafts.forEach(d => { d.items = d.items.filter(it => norm(it.name) !== gone); if (!d.items.length) d.items.push({ name: "", note: "" }); });
       sess = null; buildHist(); renderDatalist();
       setStatus("Exercise deleted", "ok");
       if (page === "exercise") location.hash = "#exercises"; else renderExercises();
@@ -1416,7 +1488,7 @@ input.title-input { font-size: 24px; }
   let chartData = null;
   function renderExercise() {
     const el = $("#pExercise"), id = pageId;
-    const known = EX.has(id) || HIST.has(id);
+    const known = EX.has(id) || HIST.has(id) || WONLY.has(id);
     if (!known) {
       el.innerHTML = `<div class="crumbs"><a href="#exercises">← All exercises</a></div><div class="empty-box">${isLoaded() || !db ? "This exercise isn't here anymore." : "Loading…"}</div>`;
       chartData = null; return;
@@ -1435,8 +1507,19 @@ input.title-input { font-size: 24px; }
         <input type="text" id="exdNote" placeholder="e.g. Seat at 6, cable height 9, lead with elbows" value="${esc(ex.note)}" ${readOnly ? "disabled" : ""}>
         <p class="help" id="exdMsg">Shows up under this exercise whenever you log it.</p>
       </div>`;
+    // every day you logged it, newest first (days with only weights show as "reps not logged")
+    const sessRow = (s, wo) => {
+      const lg = s.logs.find(x => WK.has(x.wid)) || s.logs[0];
+      const can = lg && WK.has(lg.wid);
+      const setsCell = wo ? s.sets.map(st => fmtW(st.w) + (st.r > 0 ? "×" + st.r : " lb")).join(" · ") : setsText(s.sets, s.maxW === 0);
+      return `<tr class="${can ? "link" : ""}" ${can ? `data-wid="${esc(lg.wid)}" data-date="${s.date}" tabindex="0"` : ""}><td>${esc(fmtDate(s.date))}<br><span class="meta">${esc(s.logs.map(x => x.wname).join(", "))}</span></td><td class="mono">${esc(setsCell)}${wo ? '<br><span class="meta">reps not logged</span>' : ""}</td><td class="num">${wo ? "–" : bw ? s.reps : fmtInt(s.vol)}</td></tr>`;
+    };
+    const wo = WONLY.get(id) || [];
+    const sessRows = h.map(s => [s, false]).concat(wo.map(s => [s, true])).sort((a, b) => a[0].date < b[0].date ? 1 : a[0].date > b[0].date ? -1 : 0).map(([s, w]) => sessRow(s, w)).join("");
+    const sessCard = `<div class="card"><h2>Every session</h2><p class="sub">Select a row to open that workout.</p><div class="table-wrap"><table><thead><tr><th>Date</th><th>Sets</th><th class="num">${bw ? "Reps" : "Volume"}</th></tr></thead><tbody>${sessRows}</tbody></table></div></div>`;
     if (!h.length) {
-      el.innerHTML = head + `<div class="empty-box" style="margin-top:14px">No sets logged yet. Log it from ${uses.length ? uses.map(w => `<a href="#workout-${esc(w.id)}">${esc(w.name)}</a>`).join(" or ") : "a workout"} and its progress shows up here.</div>` + delSection(id);
+      const where = uses.length ? uses.map(w => `<a href="#workout-${esc(w.id)}">${esc(w.name)}</a>`).join(" or ") : "a workout";
+      el.innerHTML = head + `<div class="stack" style="margin-top:14px"><div class="empty-box">${wo.length ? `So far only weights were logged for this one, without reps, so there's nothing to chart yet. Log reps from ${where} and its progress shows up here.` : `No sets logged yet. Log it from ${where} and its progress shows up here.`}</div>${wo.length ? sessCard : ""}</div>` + delSection(id);
       chartData = null; return;
     }
     let tiles = "";
@@ -1453,11 +1536,6 @@ input.title-input { font-size: 24px; }
     const byR = new Map();
     if (!bw) h.forEach(s => s.sets.forEach(st => { if (st.w <= 0) return; const c = byR.get(st.r); if (!c || st.w > c.w) byR.set(st.r, { w: st.w, date: s.date }); }));
     const repRows = [...byR.entries()].sort((a, b) => a[0] - b[0]).slice(0, 15).map(([r, v]) => `<tr><td class="num">${r}</td><td class="num">${fmtW(v.w)} lb</td><td>${esc(fmtDate(v.date))}</td></tr>`).join("");
-    const sessRows = h.slice().reverse().map(s => {
-      const lg = s.logs.find(x => WK.has(x.wid)) || s.logs[0];
-      const can = lg && WK.has(lg.wid);
-      return `<tr class="${can ? "link" : ""}" ${can ? `data-wid="${esc(lg.wid)}" data-date="${s.date}" tabindex="0"` : ""}><td>${esc(fmtDate(s.date))}<br><span class="meta">${esc(s.logs.map(x => x.wname).join(", "))}</span></td><td class="mono">${esc(setsText(s.sets, s.maxW === 0))}</td><td class="num">${bw ? s.reps : fmtInt(s.vol)}</td></tr>`;
-    }).join("");
     el.innerHTML = head + `<div class="stack" style="margin-top:14px">
       <div class="range chips" role="group" aria-label="Time range">${RANGES.map(r => `<button type="button" class="chip rg-chip" data-r="${r[0]}" aria-pressed="${r[0] === rg[0]}">${r[1]}</button>`).join("")}</div>
       ${tiles}
@@ -1473,7 +1551,7 @@ input.title-input { font-size: 24px; }
         <div class="chart" id="chart1"></div></div>
       <div class="grid2">
         ${bw ? "" : `<div class="card"><h2>Rep records</h2><p class="sub">Heaviest weight you've done for each rep count.</p><div class="table-wrap"><table><thead><tr><th class="num">Reps</th><th class="num">Weight</th><th>Date</th></tr></thead><tbody>${repRows}</tbody></table></div></div>`}
-        <div class="card"><h2>Every session</h2><p class="sub">Select a row to open that workout.</p><div class="table-wrap"><table><thead><tr><th>Date</th><th>Sets</th><th class="num">${bw ? "Reps" : "Volume"}</th></tr></thead><tbody>${sessRows}</tbody></table></div></div>
+        ${sessCard}
       </div></div>` + delSection(id);
     const firstOf = s => s.sets[0];
     const tipFirst = s => { const f = firstOf(s); return `<strong>${esc(fmtDate(s.date))}</strong>${bw ? `First set <span class="v">${f.r} reps</span>` : `First set <span class="v">${fmtW(f.w)}×${f.r}</span><br>Volume <span class="v">${fmtInt(f.w * f.r)} lb</span>`}`; };
@@ -1559,8 +1637,10 @@ input.title-input { font-size: 24px; }
   }
   async function route() {
     const [p, id] = parseHash();
-    const changed = p !== page || id !== pageId;
+    const changed = p !== page || id !== pageId, from = page;
     if (changed && page === "workout" && mode === "log") await flush();
+    // a workout opened from the Workouts list starts on today
+    if (changed && p === "workout" && from === "workouts" && !pendingDate && sess && sess.wid === id && sess.date !== todayStr()) sess = null;
     page = p; pageId = id;
     if (changed && !$("#modal").hidden) modalCancel();
     if (changed && p === "workout") mode = drafts.has(id) ? "edit" : "log";
@@ -1591,7 +1671,10 @@ input.title-input { font-size: 24px; }
     if (today === shownDay) return;
     const was = shownDay; shownDay = today;
     // it's a new day: a workout still showing "today" from yesterday moves to the real today
-    if (page === "workout" && mode === "log" && sess && sess.date === was) { await flush(); buildSession(sess.wid, today); }
+    if (sess && sess.date === was) {
+      await flush();
+      if (page === "workout" && mode === "log") buildSession(sess.wid, today); else sess = null;
+    }
     render();
   }
   document.addEventListener("visibilitychange", () => { if (document.visibilityState === "hidden") flush(); else onBackToApp(); });
@@ -1707,7 +1790,8 @@ input.title-input { font-size: 24px; }
     }
     await flush();
     try { LocalDB.replaceAll(r.data); } catch (e) { say("Couldn't save that on this phone. It may be out of storage space.", true); return false; }
-    sess = null; drafts.clear();
+    sess = null; drafts.clear(); lastWritten.clear();
+    try { Object.keys(localStorage).filter(k => k.startsWith(BK)).forEach(k => localStorage.removeItem(k)); } catch (e) { /* ignore */ }
     say(`Loaded ${n.w} workout${n.w === 1 ? "" : "s"}, ${n.e} exercise${n.e === 1 ? "" : "s"} and ${n.l} session${n.l === 1 ? "" : "s"}.`);
     setStatus("Restored", "ok");
     return true;
