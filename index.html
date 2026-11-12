@@ -263,6 +263,14 @@ input.title-input:hover { border-color: var(--line); }
 .delta.down { color: var(--critical); }
 .delta.flat { color: var(--ink-3); }
 .chart { position: relative; width: 100%; min-height: 220px; }
+.str-card { margin-bottom: 14px; }
+.str-num { display: flex; align-items: baseline; flex-wrap: wrap; gap: 4px 12px; margin: 4px 0 2px; }
+.str-big { font-family: var(--font-display); font-size: 40px; font-weight: 900; line-height: 1; }
+.str-delta { font-family: var(--font-mono); font-size: 14px; color: var(--ink-2); }
+.str-delta.up { color: var(--accent-ink); }
+.str-delta.down { color: var(--critical); }
+.str-card .chart { min-height: 180px; }
+.str-stats { margin: 6px 0 0; }
 .chart-head { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 8px 12px; }
 .seg { display: inline-flex; border: 1px solid var(--ink); border-radius: 3px; overflow: hidden; }
 .seg-btn { appearance: none; border: 0; background: var(--surface); color: var(--ink-2); font: inherit; font-size: 13px; font-weight: 700; padding: 7px 12px; cursor: pointer; min-height: 34px; }
@@ -1297,6 +1305,66 @@ input.title-input { font-size: 24px; }
   }
 
   // ---------- Exercises list ----------
+  // Overall strength: each exercise's latest top set (weight × reps; reps for bodyweight) compared to its first session,
+  // averaged across exercises, week by week. 100 = where you started.
+  // Overall strength by week, as % change from your first week (0% = where you started):
+  // each exercise's best top set that week (weight × reps; reps for bodyweight) vs. its first week,
+  // averaged over the exercises you did that week.
+  const week0 = d => addDays(d, -parseDate(d).getDay());   // weeks start on Sunday, like the calendar
+  const pctTxt = v => (Math.round(v) > 0 ? "+" : Math.round(v) < 0 ? "−" : "±") + Math.abs(Math.round(v)) + "%";
+  function strengthData() {
+    const today = todayStr(), weeks = new Map();   // week start -> { ex -> best score, vol }
+    const exs = [];
+    HIST.forEach((h, id) => {
+      const bw = h.every(x => x.maxW === 0);
+      const pts = h.map(x => ({ date: x.date, v: bw ? x.best.r : x.best.w > 0 ? x.best.w * x.best.r : 0, vol: x.vol })).filter(p => p.v > 0);
+      if (pts.length) exs.push({ id, pts, h });
+      pts.forEach(p => {
+        const wk = week0(p.date); if (!weeks.has(wk)) weeks.set(wk, { best: new Map(), vol: 0, n: 0 });
+        const W = weeks.get(wk); W.best.set(id, Math.max(W.best.get(id) || 0, p.v)); W.vol += p.vol; W.n++;
+      });
+    });
+    if (!exs.length) return null;
+    const order = [...weeks.keys()].sort(), firstWk = order[0];
+    const base = new Map();   // each exercise's best score in the first week you did it
+    order.forEach(wk => weeks.get(wk).best.forEach((v, id) => { if (!base.has(id)) base.set(id, v); }));
+    const out = order.map(wk => {
+      const W = weeks.get(wk);
+      const r = [...W.best].map(([id, v]) => v / base.get(id)), pct = 100 * (r.reduce((a, b) => a + b, 0) / r.length - 1);
+      return { wk, asOf: addDays(wk, 6) < today ? addDays(wk, 6) : today, pct, n: W.best.size, vol: W.vol };
+    });
+    let top = null;
+    exs.forEach(e => { if (e.pts.length < 2) return; const r = e.pts[e.pts.length - 1].v / e.pts[0].v; if (r > 1 && (!top || r > top.r)) top = { id: e.id, r }; });
+    let prs = 0; const month = today.slice(0, 7);
+    exs.forEach(e => e.h.forEach(x => { if (x.date.startsWith(month)) { const p = statsBefore(e.h, x.date); if (x.sets.some(st => beats(st.w, st.r, p))) prs++; } }));
+    return { first: firstWk, weeks: out, top, prs };
+  }
+  function strengthHtml() {
+    const d = strengthData();
+    if (!d) return `<div class="card str-card"><h2>Overall strength</h2><p class="sub" style="margin:4px 0 0">Log a few sessions with reps and your overall strength shows up here.</p></div>`;
+    const now = d.weeks[d.weeks.length - 1].pct, r = Math.round(now);
+    const stats = [d.top ? `Most improved: ${esc(exName(d.top.id))} +${Math.round((d.top.r - 1) * 100)}%` : "", `${d.prs} PR${d.prs === 1 ? "" : "s"} this month`].filter(Boolean).join(" · ");
+    const sub = "Your top sets this week vs. your first week, averaged over the exercises you did.";
+    return `<div class="card str-card">
+        <h2>Overall strength</h2>
+        <div class="str-num"><span class="str-big">${pctTxt(now)}</span><span class="str-delta">this week vs. week of ${esc(fmtDate(d.first, { month: "short", day: "numeric" }))}</span></div>
+        <p class="sub">${sub}</p>
+        <div class="chart" id="strChart"></div>
+        <p class="meta str-stats">${stats}</p>
+      </div>`;
+  }
+  let strRo = null, strW = 0;
+  function drawStrength() {
+    const el = $("#strChart"); if (!el || page !== "exercises") return;
+    const d = strengthData(); if (!d) return;
+    const pts = d.weeks.map(w => ({ t: parseDate(w.wk).getTime(), y: w.pct,
+      tip: `<strong>Week of ${esc(fmtDate(w.wk, { month: "short", day: "numeric" }))}</strong>${w.n} exercise${w.n === 1 ? "" : "s"}<br>vs. first week <span class="v">${pctTxt(w.pct)}</span>` }));
+    drawLine(el, pts, { label: "Overall strength by week", fmt: pctTxt, tick: v => (v > 0 ? "+" : v < 0 ? "−" : "") + Math.abs(v) + "%", neg: true });
+    if ("ResizeObserver" in window) {
+      if (!strRo) strRo = new ResizeObserver(en => { const w = Math.round(en[0].contentRect.width); if (w !== strW) { strW = w; requestAnimationFrame(drawStrength); } });
+      strRo.disconnect(); strW = Math.round(el.clientWidth); strRo.observe(el);
+    }
+  }
   function spark(h, bw) {
     const pts = (h || []).slice(-12).map(s => bw ? s.best.r : s.best.w * s.best.r);
     const W = 80, H = 26;
@@ -1324,6 +1392,7 @@ input.title-input { font-size: 24px; }
     }
     if (searchOnly && $("#exList")) { $("#exList").innerHTML = listHtml(); return; }
     el.innerHTML = `<div class="page-head"><div><h2 class="page-title">Exercises</h2><p class="sub">Select an exercise to see how it's progressing.</p></div>${newExBtn}</div>
+      ${strengthHtml()}
       <div class="filters">
         <div class="chips" role="group" aria-label="Filter by workout">
           <button type="button" class="chip f-chip" data-f="all" aria-pressed="${exFilter === "all"}">All</button>
@@ -1332,6 +1401,7 @@ input.title-input { font-size: 24px; }
         <div><label class="sr" for="exSearch">Search exercises</label><input type="search" id="exSearch" placeholder="Search exercises" value="${esc(exSearch)}" autocomplete="off"></div>
       </div>
       <div class="ex-list" id="exList">${listHtml()}</div>`;
+    drawStrength();
     if (hadFocus) { const s = $("#exSearch"); s.focus(); s.setSelectionRange(s.value.length, s.value.length); }
     function listHtml() {
       return list.length ? list.map(id => {
@@ -1495,12 +1565,12 @@ input.title-input { font-size: 24px; }
     if (x0 === x1) { x0 -= 3 * DAY; x1 += 3 * DAY; }
     const ys = pts.map(p => p.y), ymin = Math.min(...ys), ymax = Math.max(...ys);
     const pad = (ymax - ymin) * 0.2 || Math.max(ymax * 0.08, 1);
-    const { lo, hi, ticks } = niceTicks(Math.max(0, ymin - pad), ymax + pad, 4);
+    const { lo, hi, ticks } = niceTicks(o.neg ? ymin - pad : Math.max(0, ymin - pad), ymax + pad, 4);
     const X = t => m.l + (t - x0) / (x1 - x0) * (W - m.l - m.r);
     const Y = v => m.t + (1 - (v - lo) / (hi - lo)) * (H - m.t - m.b);
     const compact = hi >= 10000;
     let s = `<svg width="${W}" height="${H}" viewBox="0 0 ${W} ${H}" role="img" aria-label="${esc(o.label)}">`;
-    ticks.forEach(v => { s += `<line class="grid-line" x1="${m.l}" x2="${W - m.r}" y1="${Y(v)}" y2="${Y(v)}"/><text class="ax-text" x="${m.l - 8}" y="${Y(v) + 4}" text-anchor="end">${fmtTick(v, compact)}</text>`; });
+    ticks.forEach(v => { s += `<line class="grid-line" x1="${m.l}" x2="${W - m.r}" y1="${Y(v)}" y2="${Y(v)}"/><text class="ax-text" x="${m.l - 8}" y="${Y(v) + 4}" text-anchor="end">${o.tick ? o.tick(v) : fmtTick(v, compact)}</text>`; });
     const fx = xLabelFmt((x1 - x0) / DAY), pxs = pts.map(p => X(p.t));
     pickLabels(pxs, 62).forEach(i => { s += `<text class="ax-text" x="${pxs[i]}" y="${H - 8}" text-anchor="${anchorFor(i, pts.length)}">${esc(fx(pts[i].t))}</text>`; });
     const d = pts.map((p, i) => (i ? "L" : "M") + X(p.t).toFixed(1) + " " + Y(p.y).toFixed(1)).join(" ");
